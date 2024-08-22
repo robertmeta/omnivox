@@ -38,10 +38,6 @@ void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
     buf->len = suggested_size;
 }
 
-void tts_callback(LONG lParam1, LONG lParam2, DWORD dwParam3, UINT uiParam4) {
-    // Handle TTS callbacks here
-}
-
 void process_wav(const char* input_file, const char* output_file) {
     printf("Processing WAV file: %s -> %s\n", input_file, output_file);
 
@@ -265,11 +261,16 @@ void stdin_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
 
 void check_portaudio_stream(uv_timer_t* handle) {
     if (Pa_IsStreamActive(audio_stream)) {
-        printf("PortAudio stream is active\n");
+      //printf("PortAudio stream is active\n");
     } else {
-        printf("PortAudio stream is not active\n");
+      //printf("PortAudio stream is not active\n");
     }
 }
+
+void tts_callback(LONG lParam1, LONG lParam2, DWORD dwParam3, UINT uiParam4) {
+    // Handle TTS callbacks here
+}
+
 
 int main() {
     MMRESULT result = TextToSpeechStartup(&tts_handle, 0, 0, tts_callback, 0);

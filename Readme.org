@@ -17,8 +17,8 @@ The goal is most uses will use the binaries.
 
 Nope. Will be ready when the following features are in.
 
-** Emacspeak Protocol Covered [0%]
-- [ ] Single path
+** Emacspeak Protocol Covered [10%]
+- [X] Single path
   wav -> channel manipulation -> primary output
 - [ ] Windows Right / Left channel support
 - [ ] Linux Right / Left channel support
