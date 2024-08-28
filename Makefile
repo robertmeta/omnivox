@@ -15,9 +15,8 @@ TARGET = omnivox
 .PHONY: all run clean
 
 # Default target
-all: run
+all: $(TARGET)
 
-# Build the target executable
 $(TARGET): omnivox.c
 	gcc $^ -o $@ \
 		-I$(DECTALK_INCLUDE) \
@@ -25,7 +24,9 @@ $(TARGET): omnivox.c
 		-I$(HOMEBREW_INCLUDE) \
 		-L$(HOMEBREW_LIB) \
 		$(LIBS) \
-		$(RPATH)
+		$(RPATH) \
+		-Wall -Wextra -Wpedantic -Werror -Wshadow -Wformat=2 -Wfloat-equal -Wundef -Wconversion \
+		-std=c11 -D_FORTIFY_SOURCE=2
 
 # Run the executable
 run: $(TARGET)
@@ -34,3 +35,6 @@ run: $(TARGET)
 # Clean build artifacts and .wav files
 clean:
 	rm -f $(TARGET) *.wav
+
+watch:
+	find *.c | entr -r make 

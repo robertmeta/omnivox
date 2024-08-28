@@ -5,6 +5,16 @@
 #include <dtk/ttsapi.h>
 #include <sndfile.h>
 #include <portaudio.h>
+#include <stdint.h>
+
+#include <uv.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <dtk/ttsapi.h>
+#include <sndfile.h>
+#include <portaudio.h>
+#include <stdint.h>
 
 #define DEFAULT_PORT 22222
 #define DEFAULT_BACKLOG 128
@@ -18,11 +28,19 @@ typedef struct {
 } client_t;
 
 typedef struct {
-    char *filename;
-    char *processed_filename;
+    float *data;
+    sf_count_t frames;
+    int samplerate;
+    int channels;
     int is_processed;
     int is_playing;
 } audio_item_t;
+
+typedef struct {
+    BYTE *buffer;
+    DWORD buffer_size;
+    DWORD current_position;
+} virtual_file_t;
 
 LPTTS_HANDLE_T tts_handle;
 uv_loop_t *loop;
@@ -34,52 +52,24 @@ int current_audio_index = 0;
 PaStream *audio_stream;
 
 void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
+    (void)handle;
     buf->base = malloc(suggested_size);
     buf->len = suggested_size;
 }
 
-void process_wav(const char* input_file, const char* output_file) {
-    printf("Processing WAV file: %s -> %s\n", input_file, output_file);
+void process_wav_in_memory(float *input_data, sf_count_t input_frames, int input_samplerate, float **output_data, sf_count_t *output_frames) {
+    (void)input_samplerate;
+    printf("Processing WAV in memory\n");
 
-    SF_INFO sfinfo;
-    SNDFILE* infile = sf_open(input_file, SFM_READ, &sfinfo);
-    if (!infile) {
-        fprintf(stderr, "Error opening input file: %s\n", sf_strerror(NULL));
-        return;
-    }
-    printf("Input file opened successfully. Channels: %d, Samplerate: %d\n", sfinfo.channels, sfinfo.samplerate);
+    *output_frames = input_frames;
+    *output_data = malloc((size_t)(*output_frames) * 2 * sizeof(float));  // Allocate stereo output
 
-    sfinfo.channels = 2; // Set to stereo
-    SNDFILE* outfile = sf_open(output_file, SFM_WRITE, &sfinfo);
-    if (!outfile) {
-        fprintf(stderr, "Error opening output file: %s\n", sf_strerror(NULL));
-        sf_close(infile);
-        return;
-    }
-    printf("Output file opened successfully\n");
-
-    float buffer[1024];
-    float stereo_buffer[2048];
-    sf_count_t read_count;
-    sf_count_t total_frames_processed = 0;
-
-    while ((read_count = sf_read_float(infile, buffer, 1024)) > 0) {
-        for (int i = 0; i < read_count; i++) {
-            stereo_buffer[i*2] = 0;           // Left channel (silent)
-            stereo_buffer[i*2+1] = buffer[i]; // Right channel
-        }
-        sf_count_t frames_written = sf_writef_float(outfile, stereo_buffer, read_count);
-        if (frames_written != read_count) {
-            fprintf(stderr, "Error writing to output file\n");
-            break;
-        }
-        total_frames_processed += read_count;
+    for (sf_count_t i = 0; i < input_frames; i++) {
+        (*output_data)[i*2] = 0;           // Left channel (silent)
+        (*output_data)[i*2+1] = input_data[i]; // Right channel
     }
 
-    sf_close(infile);
-    sf_close(outfile);
-
-    printf("WAV processing complete. Total frames processed: %lld\n", (long long)total_frames_processed);
+    printf("WAV processing complete. Total frames processed: %lld\n", (long long)*output_frames);
 }
 
 int audio_callback(const void *inputBuffer, void *outputBuffer,
@@ -87,50 +77,46 @@ int audio_callback(const void *inputBuffer, void *outputBuffer,
                    const PaStreamCallbackTimeInfo* timeInfo,
                    PaStreamCallbackFlags statusFlags,
                    void *userData) {
-    float *out = (float*)outputBuffer;
-    static SF_INFO sfinfo;
-    static SNDFILE *file = NULL;
-    static sf_count_t total_frames_read = 0;
+    (void)inputBuffer;
+    (void)timeInfo;
+    (void)statusFlags;
+    (void)userData;
 
-    (void) inputBuffer; // Prevent unused variable warning
+    float *out = (float*)outputBuffer;
+    static sf_count_t current_frame = 0;
 
     uv_mutex_lock(&audio_queue_mutex);
     if (audio_queue_size > 0 && !audio_queue[current_audio_index].is_playing && audio_queue[current_audio_index].is_processed) {
-        if (file) sf_close(file);
-        file = sf_open(audio_queue[current_audio_index].processed_filename, SFM_READ, &sfinfo);
-        if (!file) {
-            fprintf(stderr, "Error opening file: %s\n", sf_strerror(NULL));
-            uv_mutex_unlock(&audio_queue_mutex);
-            return paComplete;
-        }
-        printf("Opened file: %s\n", audio_queue[current_audio_index].processed_filename);
         audio_queue[current_audio_index].is_playing = 1;
-        total_frames_read = 0;
+        current_frame = 0;
     }
     uv_mutex_unlock(&audio_queue_mutex);
 
-    if (file) {
-        sf_count_t frames_read = sf_readf_float(file, out, framesPerBuffer);
-        total_frames_read += frames_read;
+    if (audio_queue_size > 0 && audio_queue[current_audio_index].is_playing) {
+        audio_item_t *current_item = &audio_queue[current_audio_index];
+        sf_count_t frames_to_play = (sf_count_t)framesPerBuffer;
+        if (current_frame + frames_to_play > current_item->frames) {
+            frames_to_play = current_item->frames - current_frame;
+        }
+
+        memcpy(out, current_item->data + current_frame * current_item->channels, (size_t)(frames_to_play * current_item->channels) * sizeof(float));
+        current_frame += frames_to_play;
 
         // If we didn't read enough frames, fill the rest with silence
-        if (frames_read < framesPerBuffer) {
-            for (sf_count_t i = frames_read * sfinfo.channels; i < framesPerBuffer * sfinfo.channels; i++) {
+        if (frames_to_play < (sf_count_t)framesPerBuffer) {
+            for (sf_count_t i = frames_to_play * current_item->channels; i < (sf_count_t)(framesPerBuffer * (unsigned long)current_item->channels); i++) {
                 out[i] = 0.0f;
             }
         }
 
-        printf("Frames read: %lld / %lld, Total read: %lld\n", 
-               (long long)frames_read, (long long)framesPerBuffer, (long long)total_frames_read);
+        printf("Frames played: %lld / %lld, Total played: %lld\n", 
+               (long long)frames_to_play, (long long)framesPerBuffer, (long long)current_frame);
 
-        if (frames_read == 0) {
-            printf("End of file reached\n");
-            sf_close(file);
-            file = NULL;
+        if (current_frame >= current_item->frames) {
+            printf("End of audio reached\n");
 
             uv_mutex_lock(&audio_queue_mutex);
-            free(audio_queue[current_audio_index].filename);
-            free(audio_queue[current_audio_index].processed_filename);
+            free(current_item->data);
             memmove(&audio_queue[0], &audio_queue[1], sizeof(audio_item_t) * (MAX_AUDIO_QUEUE - 1));
             audio_queue_size--;
             if (current_audio_index > 0) current_audio_index--;
@@ -139,13 +125,94 @@ int audio_callback(const void *inputBuffer, void *outputBuffer,
             uv_cond_signal(&audio_queue_cond);
         }
     } else {
-        // No file to play, output silence
+        // No audio to play, output silence
         for (unsigned long i = 0; i < framesPerBuffer * 2; i++) {
             out[i] = 0.0f;
         }
     }
 
     return paContinue;
+}
+
+sf_count_t vio_get_filelen(void *user_data) {
+    virtual_file_t *vf = (virtual_file_t *)user_data;
+    return vf->buffer_size;
+}
+
+sf_count_t vio_seek(sf_count_t offset, int whence, void *user_data) {
+    virtual_file_t *vf = (virtual_file_t *)user_data;
+    switch (whence) {
+        case SEEK_SET:
+            if (offset <= UINT32_MAX) {
+                vf->current_position = (DWORD)offset;
+            } else {
+                // Handle error
+                return -1;
+            }
+            break;
+        case SEEK_CUR:
+            if (vf->current_position + offset <= UINT32_MAX) {
+                vf->current_position += (DWORD)offset;
+            } else {
+                // Handle error
+                return -1;
+            }
+            break;
+        case SEEK_END:
+            if (vf->buffer_size + offset <= UINT32_MAX) {
+                vf->current_position = (DWORD)(vf->buffer_size + offset);
+            } else {
+                // Handle error
+                return -1;
+            }
+            break;
+    }
+    return vf->current_position;
+}
+
+sf_count_t vio_read(void *ptr, sf_count_t count, void *user_data) {
+    virtual_file_t *vf = (virtual_file_t *)user_data;
+    sf_count_t to_read = (vf->current_position + count > vf->buffer_size) ? 
+                         (vf->buffer_size - vf->current_position) : count;
+    memcpy(ptr, vf->buffer + vf->current_position, (size_t)to_read);
+    vf->current_position += (DWORD)to_read;
+    return to_read;
+}
+
+sf_count_t vio_tell(void *user_data) {
+    virtual_file_t *vf = (virtual_file_t *)user_data;
+    return vf->current_position;
+}
+
+// Forward declaration of GetSpeechData
+MMRESULT GetSpeechData(LPTTS_HANDLE_T handle, BYTE **buffer, DWORD *buffer_size);
+
+// Add these functions before process_input
+static sf_count_t mem_get_filelen(void *user_data) {
+    return ((TTS_BUFFER_T*)user_data)->dwBufferLength;
+}
+
+static sf_count_t mem_seek(sf_count_t offset, int whence, void *user_data) {
+    TTS_BUFFER_T *buf = (TTS_BUFFER_T*)user_data;
+    switch(whence) {
+        case SEEK_SET: buf->dwReserved = (DWORD)offset; break;
+        case SEEK_CUR: buf->dwReserved += (DWORD)offset; break;
+        case SEEK_END: buf->dwReserved = buf->dwBufferLength + (DWORD)offset; break;
+    }
+    return buf->dwReserved;
+}
+
+static sf_count_t mem_read(void *ptr, sf_count_t count, void *user_data) {
+    TTS_BUFFER_T *buf = (TTS_BUFFER_T*)user_data;
+    sf_count_t to_read = (buf->dwReserved + count > buf->dwBufferLength) ?
+                         (buf->dwBufferLength - buf->dwReserved) : count;
+    memcpy(ptr, buf->lpData + buf->dwReserved, (size_t)to_read);
+    buf->dwReserved += (DWORD)to_read;
+    return to_read;
+}
+
+static sf_count_t mem_tell(void *user_data) {
+    return ((TTS_BUFFER_T*)user_data)->dwReserved;
 }
 
 void process_input(char* input) {
@@ -161,40 +228,109 @@ void process_input(char* input) {
         return;
     }
 
-    char *filename = malloc(32);
-    char *processed_filename = malloc(32);
-    sprintf(filename, "output_%d.wav", audio_queue_size);
-    sprintf(processed_filename, "processed_%d.wav", audio_queue_size);
+    MMRESULT result;
 
-    audio_queue[audio_queue_size].filename = filename;
-    audio_queue[audio_queue_size].processed_filename = processed_filename;
-    audio_queue[audio_queue_size].is_processed = 0;
+    // Open in-memory output
+    result = TextToSpeechOpenInMemory(tts_handle, WAVE_FORMAT_1M16);
+    if (result != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Error in TextToSpeechOpenInMemory: %d\n", result);
+        uv_mutex_unlock(&audio_queue_mutex);
+        return;
+    }
+
+    // Speak the text
+    result = TextToSpeechSpeak(tts_handle, input, TTS_FORCE);
+    if (result != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Error in TextToSpeechSpeak: %d\n", result);
+        TextToSpeechCloseInMemory(tts_handle);
+        uv_mutex_unlock(&audio_queue_mutex);
+        return;
+    }
+
+    // Synchronize to ensure speech synthesis is complete
+    result = TextToSpeechSync(tts_handle);
+    if (result != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Error in TextToSpeechSync: %d\n", result);
+        TextToSpeechCloseInMemory(tts_handle);
+        uv_mutex_unlock(&audio_queue_mutex);
+        return;
+    }
+
+    // Retrieve the speech data
+    LPTTS_BUFFER_T ptts_buffer = NULL;
+    result = TextToSpeechReturnBuffer(tts_handle, &ptts_buffer);
+    if (result != MMSYSERR_NOERROR || ptts_buffer == NULL) {
+        fprintf(stderr, "Error in TextToSpeechReturnBuffer: %d\n", result);
+        TextToSpeechCloseInMemory(tts_handle);
+        uv_mutex_unlock(&audio_queue_mutex);
+        return;
+    }
+
+    // Close in-memory output
+    result = TextToSpeechCloseInMemory(tts_handle);
+    if (result != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Error in TextToSpeechCloseInMemory: %d\n", result);
+        free(ptts_buffer->lpData);
+        free(ptts_buffer);
+        uv_mutex_unlock(&audio_queue_mutex);
+        return;
+    }
+
+    printf("Generated speech in memory, size: %d bytes\n", ptts_buffer->dwBufferLength);
+
+    // Process the speech data
+    SF_INFO sfinfo = {0};
+    sfinfo.samplerate = 11025;  // Assuming 11025 Hz sample rate, adjust if needed
+    sfinfo.channels = 1;        // Mono output
+    sfinfo.format = SF_FORMAT_WAV | SF_FORMAT_PCM_16;
+
+    SF_VIRTUAL_IO virtual_io = {
+        .get_filelen = mem_get_filelen,
+        .seek = mem_seek,
+        .read = mem_read,
+        .write = NULL,
+        .tell = mem_tell
+    };
+
+    ptts_buffer->dwReserved = 0;  // Use dwReserved as current position
+
+    SNDFILE *infile = sf_open_virtual(&virtual_io, SFM_READ, &sfinfo, ptts_buffer);
+    if (!infile) {
+        fprintf(stderr, "Error opening virtual file: %s\n", sf_strerror(NULL));
+        free(ptts_buffer->lpData);
+        free(ptts_buffer);
+        uv_mutex_unlock(&audio_queue_mutex);
+        return;
+    }
+
+    float *input_data = malloc((size_t)sfinfo.frames * sizeof(float));
+    sf_readf_float(infile, input_data, sfinfo.frames);
+    sf_close(infile);
+
+    float *processed_data;
+    sf_count_t processed_frames;
+    process_wav_in_memory(input_data, sfinfo.frames, sfinfo.samplerate, &processed_data, &processed_frames);
+
+    free(input_data);
+    free(ptts_buffer->lpData);
+    free(ptts_buffer);
+
+    audio_queue[audio_queue_size].data = processed_data;
+    audio_queue[audio_queue_size].frames = processed_frames;
+    audio_queue[audio_queue_size].samplerate = sfinfo.samplerate;
+    audio_queue[audio_queue_size].channels = 2;  // We're converting to stereo
+    audio_queue[audio_queue_size].is_processed = 1;
     audio_queue[audio_queue_size].is_playing = 0;
     audio_queue_size++;
     uv_mutex_unlock(&audio_queue_mutex);
 
-    TextToSpeechOpenWaveOutFile(tts_handle, filename, WAVE_FORMAT_1M16);
-    TextToSpeechSpeak(tts_handle, input, TTS_FORCE);
-    TextToSpeechSync(tts_handle);
-    TextToSpeechCloseWaveOutFile(tts_handle);
-
-    printf("Generated WAV file: %s\n", filename);
-
-    process_wav(filename, processed_filename);
-
-    uv_mutex_lock(&audio_queue_mutex);
-    audio_queue[audio_queue_size - 1].is_processed = 1;
-    uv_mutex_unlock(&audio_queue_mutex);
-
     uv_cond_signal(&audio_queue_cond);
-}
-
-void on_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) {
+}void on_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) {
     client_t* c = (client_t*)client->data;
 
     if (nread < 0) {
         if (nread != UV_EOF)
-            fprintf(stderr, "Read error %s\n", uv_err_name(nread));
+            fprintf(stderr, "Read error %s\n", uv_strerror((int)nread));
         uv_close((uv_handle_t*) client, NULL);
         return;
     }
@@ -260,6 +396,7 @@ void stdin_read(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf) {
 }
 
 void check_portaudio_stream(uv_timer_t* handle) {
+    (void)handle;
     if (Pa_IsStreamActive(audio_stream)) {
       //printf("PortAudio stream is active\n");
     } else {
@@ -268,11 +405,14 @@ void check_portaudio_stream(uv_timer_t* handle) {
 }
 
 void tts_callback(LONG lParam1, LONG lParam2, DWORD dwParam3, UINT uiParam4) {
+    (void)lParam1;
+    (void)lParam2;
+    (void)dwParam3;
+    (void)uiParam4;
     // Handle TTS callbacks here
 }
 
-
-int main() {
+int main(void) {
     MMRESULT result = TextToSpeechStartup(&tts_handle, 0, 0, tts_callback, 0);
     if (result != MMSYSERR_NOERROR) {
         fprintf(stderr, "Failed to initialize TTS\n");
