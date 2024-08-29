@@ -7,15 +7,6 @@
 #include <portaudio.h>
 #include <stdint.h>
 
-#include <uv.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <dtk/ttsapi.h>
-#include <sndfile.h>
-#include <portaudio.h>
-#include <stdint.h>
-
 #define DEFAULT_PORT 22222
 #define DEFAULT_BACKLOG 128
 #define MAX_LINE_LENGTH 1024
