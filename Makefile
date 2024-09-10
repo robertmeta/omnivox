@@ -7,7 +7,7 @@ HOMEBREW_LIB = /opt/homebrew/lib
 # Define the compiler and flags
 CC = gcc
 CFLAGS = -Wall -Wextra -pedantic -std=c11 -pthread
-INCLUDES = -I$(DECTALK_INCLUDE) -I$(HOMEBREW_INCLUDE)
+INCLUDES = -I$(DECTALK_INCLUDE) -I$(HOMEBREW_INCLUDE) -I. -I$(DECTALK_INCLUDE)/dtk
 LDFLAGS = -L$(DECTALK_LIB) -L$(HOMEBREW_LIB)
 LIBS = -ltts -luv -lportaudio -lsndfile -pthread
 RPATH = -Wl,-rpath,$(DECTALK_LIB)

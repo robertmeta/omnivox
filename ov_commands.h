@@ -3,6 +3,9 @@
 
 #include <stdbool.h>
 
+int ov_commands_init(void);
+void ov_commands_cleanup(void);
+
 void ov_cmd_say(const char* text);
 void ov_cmd_tts_say(const char* text);
 void ov_cmd_sync(void);

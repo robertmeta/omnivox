@@ -13,6 +13,11 @@
 #define DEFAULT_PORT 22222
 #define SAMPLE_RATE 44100
 
+// Function prototypes
+void process_command(const char* command);
+void on_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf);
+void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf);
+
 // Function to process commands
 void process_command(const char* command) {
     char cmd[32];
@@ -80,28 +85,32 @@ void on_read(uv_stream_t *client, ssize_t nread, const uv_buf_t *buf) {
 
 // Allocation callback for libuv
 void alloc_buffer(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf) {
-    buf->base = malloc(suggested_size);
+    (void)handle;  // Unused parameter
+    buf->base = (char*)malloc(suggested_size);
     buf->len = suggested_size;
 }
 
-int main(int argc, char *argv[]) {
-    // Initialize libuv loop
-    uv_loop_t *loop = malloc(sizeof(uv_loop_t));
-    uv_loop_init(loop);
+int main(void) {
+    uv_loop_t *loop;
+    uv_pipe_t stdin_pipe;
 
-    // Initialize input handling
+    loop = uv_default_loop();
+
     ov_input_init(loop);
-
-    // Initialize audio processing
     ov_audio_init();
 
-    // Initialize output handling
-    if (ov_output_init() != 0) {
+    int ret = ov_output_init();
+    if (ret != 0) {
         fprintf(stderr, "Failed to initialize audio output\n");
         return 1;
     }
 
-    // Check if we need to listen on a port
+    ret = ov_commands_init();
+    if (ret != 0) {
+        fprintf(stderr, "Failed to initialize TTS commands\n");
+        return 1;
+    }
+
     const char *listen_env = getenv("OMNIVOX_LISTEN");
     if (listen_env && strlen(listen_env) > 0) {
         const char *port_env = getenv("OMNIVOX_PORT");
@@ -109,23 +118,18 @@ int main(int argc, char *argv[]) {
         ov_input_start_server(loop, port);
     }
 
-    // Start reading from stdin
-    uv_pipe_t stdin_pipe;
     uv_pipe_init(loop, &stdin_pipe, 0);
     uv_pipe_open(&stdin_pipe, 0);
     uv_read_start((uv_stream_t*)&stdin_pipe, alloc_buffer, on_read);
 
     printf("Omnivox initialized. Enter commands:\n");
 
-    // Main event loop
     uv_run(loop, UV_RUN_DEFAULT);
 
-    // Cleanup
     ov_input_cleanup();
     ov_audio_cleanup();
     ov_output_cleanup();
-    uv_loop_close(loop);
-    free(loop);
-
+    ov_commands_cleanup();
+    
     return 0;
 }
