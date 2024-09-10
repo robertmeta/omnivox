@@ -5,89 +5,121 @@
 #include "ov_commands.h"
 #include "ov_audio.h"
 #include "ov_output.h"
-#include <dtk/ttsapi.h>
+#include "ttsapi.h"
 
 #define SAMPLE_RATE 44100
 #define MAX_TTS_BUFFER_SIZE 1048576  // 1MB buffer for TTS output
 
 static LPTTS_HANDLE_T ttsHandle = NULL;
+static TTS_BUFFER_T ttsBuffer;
 
 // Callback function for TTS
 static void CALLBACK ttsCallback(LONG lParam1, LONG lParam2, DWORD dwInstance, UINT uiMsg)
 {
-    // Handle TTS callbacks if needed
-    (void)lParam1;  // Unused parameter
-    (void)lParam2;  // Unused parameter
-    (void)dwInstance;  // Unused parameter
-    (void)uiMsg;  // Unused parameter
+    printf("Debug: TTS Callback - lParam1: %ld, lParam2: %ld, uiMsg: %u\n", lParam1, lParam2, uiMsg);
 }
 
 int ov_commands_init(void)
 {
+    printf("Debug: Initializing TTS engine\n");
     MMRESULT result = TextToSpeechStartupEx(&ttsHandle, 0, 0, ttsCallback, 0);
     if (result != MMSYSERR_NOERROR) {
-        fprintf(stderr, "Failed to initialize TTS engine\n");
+        fprintf(stderr, "Failed to initialize TTS engine. Error code: %d\n", result);
         return 1;
     }
+    if (ttsHandle == NULL) {
+        fprintf(stderr, "TTS handle is NULL after initialization\n");
+        return 1;
+    }
+    printf("Debug: TTS engine initialized successfully\n");
+
+    // Initialize TTS buffer
+    memset(&ttsBuffer, 0, sizeof(TTS_BUFFER_T));
+    ttsBuffer.lpData = malloc(MAX_TTS_BUFFER_SIZE);
+    ttsBuffer.dwMaximumBufferLength = MAX_TTS_BUFFER_SIZE;
+
+    // Open TTS output to memory
+    result = TextToSpeechOpenInMemory(ttsHandle, WAVE_FORMAT_1M16);
+    if (result != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Failed to open TTS output to memory. Error code: %d\n", result);
+        return 1;
+    }
+
+    printf("Debug: TTS output opened to memory\n");
+
+    // Test TTS engine
+    result = TextToSpeechSpeak(ttsHandle, "Test", TTS_FORCE);
+    if (result != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Failed to speak test phrase. Error code: %d\n", result);
+        return 1;
+    }
+    printf("Debug: TTS engine test successful\n");
+
     return 0;
 }
 
 void ov_commands_cleanup(void)
 {
     if (ttsHandle) {
+        TextToSpeechCloseInMemory(ttsHandle);
         TextToSpeechShutdown(ttsHandle);
         ttsHandle = NULL;
+    }
+    if (ttsBuffer.lpData) {
+        free(ttsBuffer.lpData);
     }
 }
 
 void ov_cmd_say(const char* text)
 {
+    printf("Debug: Entering ov_cmd_say with text: %s\n", text);
+
     if (!ttsHandle) {
         fprintf(stderr, "TTS engine not initialized\n");
         return;
     }
 
-    // Allocate buffer for TTS output
-    TTS_BUFFER_T ttsBuffer;
-    ttsBuffer.lpData = malloc(MAX_TTS_BUFFER_SIZE);
-    ttsBuffer.dwMaximumBufferLength = MAX_TTS_BUFFER_SIZE;
+    // Reset buffer
     ttsBuffer.dwBufferLength = 0;
 
-    // Open TTS output to memory
-    MMRESULT result = TextToSpeechOpenInMemory(ttsHandle, WAVE_FORMAT_1M16);
+    // Speak the text
+    MMRESULT result = TextToSpeechSpeak(ttsHandle, (char*)text, TTS_FORCE);
     if (result != MMSYSERR_NOERROR) {
-        fprintf(stderr, "Failed to open TTS output to memory\n");
-        free(ttsBuffer.lpData);
+        fprintf(stderr, "Failed to speak text. Error code: %d\n", result);
         return;
     }
 
-    // Speak the text
-    result = TextToSpeechSpeak(ttsHandle, (char*)text, TTS_FORCE);
+    printf("Debug: Text spoken\n");
+
+    // Wait for speech to complete
+    result = TextToSpeechSync(ttsHandle);
     if (result != MMSYSERR_NOERROR) {
-        fprintf(stderr, "Failed to speak text\n");
-        TextToSpeechCloseInMemory(ttsHandle);
-        free(ttsBuffer.lpData);
+        fprintf(stderr, "Failed to sync TTS. Error code: %d\n", result);
         return;
     }
+
+    printf("Debug: TTS synced\n");
 
     // Get the TTS output
     LPTTS_BUFFER_T pTtsBuffer = &ttsBuffer;
     result = TextToSpeechReturnBuffer(ttsHandle, &pTtsBuffer);
     if (result != MMSYSERR_NOERROR) {
-        fprintf(stderr, "Failed to get TTS output\n");
-        TextToSpeechCloseInMemory(ttsHandle);
-        free(ttsBuffer.lpData);
+        fprintf(stderr, "Failed to get TTS output. Error code: %d\n", result);
         return;
     }
 
-    // Close TTS output
-    TextToSpeechCloseInMemory(ttsHandle);
+    printf("Debug: TTS output retrieved. Buffer length: %lu\n", ttsBuffer.dwBufferLength);
+
+    if (ttsBuffer.dwBufferLength == 0) {
+        fprintf(stderr, "TTS output buffer is empty\n");
+        return;
+    }
 
     // Play the generated audio
+    printf("Debug: Attempting to play buffer of length %lu\n", ttsBuffer.dwBufferLength);
     ov_output_play_buffer((float*)ttsBuffer.lpData, ttsBuffer.dwBufferLength / sizeof(float));
 
-    // Clean up
-    free(ttsBuffer.lpData);
+    printf("Debug: Audio playback initiated\n");
 }
 
 void ov_cmd_tts_say(const char* text)
