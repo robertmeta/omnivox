@@ -2,12 +2,7 @@
 #define OV_OUTPUT_H
 
 #include <portaudio.h>
-
-typedef struct {
-    const float *buffer;
-    unsigned long frameIndex;
-    unsigned long maxFrameIndex;
-} paTestData;
+#include <stdatomic.h>
 
 int ov_output_init(void);
 int ov_output_play_buffer(const float *buffer, unsigned long frames);
