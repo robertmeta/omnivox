@@ -120,8 +120,8 @@ int audio_callback(const void *inputBuffer, void *outputBuffer,
             }
         }
 
-        printf("Frames read: %lld / %lld, Total read: %lld\n", 
-               (long long)frames_read, (long long)framesPerBuffer, (long long)total_frames_read);
+        //printf("Frames read: %lld / %lld, Total read: %lld\n", 
+        //       (long long)frames_read, (long long)framesPerBuffer, (long long)total_frames_read);
 
         if (frames_read == 0) {
             printf("End of file reached\n");
@@ -328,17 +328,19 @@ int main() {
     uv_mutex_init(&audio_queue_mutex);
     uv_cond_init(&audio_queue_cond);
 
-    uv_tcp_t server;
-    uv_tcp_init(loop, &server);
+    if (1 == 2) {
+        uv_tcp_t server;
+        uv_tcp_init(loop, &server);
 
-    struct sockaddr_in addr;
-    uv_ip4_addr("0.0.0.0", DEFAULT_PORT, &addr);
+        struct sockaddr_in addr;
+        uv_ip4_addr("0.0.0.0", DEFAULT_PORT, &addr);
 
-    uv_tcp_bind(&server, (const struct sockaddr*)&addr, 0);
-    int r = uv_listen((uv_stream_t*)&server, DEFAULT_BACKLOG, on_new_connection);
-    if (r) {
-        fprintf(stderr, "Listen error %s\n", uv_strerror(r));
-        return 1;
+        uv_tcp_bind(&server, (const struct sockaddr*)&addr, 0);
+        int r = uv_listen((uv_stream_t*)&server, DEFAULT_BACKLOG, on_new_connection);
+        if (r) {
+            fprintf(stderr, "Listen error %s\n", uv_strerror(r));
+            return 1;
+        }
     }
 
     // Set up STDIN handling

@@ -1,0 +1,33 @@
+vars: {
+    d2-config: {
+        layout-engine: elk
+        theme-id: 200
+    }
+}
+direction: down
+
+blah {
+Emacs.Emacspeak -> Omnivox.STDINWorker: cmd
+Emacs.Emacspeak -> Omnivox.TCPWorker: cmd
+
+Omnivox.TCPWorker -> Omnivox.CommandQueue: cmd
+Omnivox.TCPWorker.label: TCPWorker <Thread>
+Omnivox.STDINWorker -> Omnivox.CommandQueue: cmd
+Omnivox.STDINWorker.label: STDINWorker <Thread>
+
+Omnivox.CommandQueue -> Omnivox.CommandWorker
+Omnivox.CommandWorker.label: CommandWorker <thread>
+Omnivox.CommandQueue.shape: queue
+Omnivox.CommandQueue.label: CommandQueue <ThreadSafe>
+Omnivox.AudioQueue.shape: queue
+Omnivox.AudioQueue.label: AudioQueue <ThreadSafe>
+
+Omnivox.CommandWorker.BuildTone -> Omnivox.AudioQueue
+Omnivox.CommandWorker.BuildTone.label: BuildTone <function>
+Omnivox.CommandWorker.BuildTTS -> Omnivox.AudioQueue
+Omnivox.CommandWorker.BuildTTS.label: BuildTTS <function>
+Omnivox.CommandWorker.BuildWavFromOgg -> Omnivox.AudioQueue
+Omnivox.CommandWorker.BuildBuildWavFromOgg.label: BuildBuildWavFromOgg <function>
+
+Omnivox.AudioQueue -> Omnivox.AudioHandler
+Omnivox.AudioHandler.label: AudioHandler <thread>
