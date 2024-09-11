@@ -25,6 +25,9 @@ OBJS = $(SRCS:.c=.o)
 # Default target
 all: $(TARGET)
 
+foo:
+	$(CC) foo.c -o foo $(INCLUDES) $(LDFLAGS) $(LIBS) $(RPATH)
+
 # Build the target executable
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $@ $(LDFLAGS) $(LIBS) $(RPATH)
