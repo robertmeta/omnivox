@@ -1,189 +1,155 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ttsapi.h>
-#include <portaudio.h>
-#include <uv.h>
+#include "ttsapi.h"
+#include "portaudio.h"
 
-#define SAMPLE_RATE 11025
-#define FRAMES_PER_BUFFER 256
-#define NUM_CHANNELS 1
-#define BUFFER_SIZE 32768  // Adjust this size as needed
+#define NUM_BUFFERS 4  // Number of buffers for speech data
+#define BUFFER_SIZE 1024 * 32 // Size of each buffer in bytes
 
-typedef struct {
-    unsigned char *audioData;
-    DWORD dataSize;
-    DWORD currentIndex;
-    int isPlaying;
-} AudioContext;
+// Callback function for PortAudio
+static int audioCallback(const void *inputBuffer, void *outputBuffer,
+                        unsigned long framesPerBuffer,
+                        const PaStreamCallbackTimeInfo *timeInfo,
+                        PaStreamCallbackFlags statusFlags,
+                        void *userData) {
+    LPTTS_BUFFER_T buffer = (LPTTS_BUFFER_T)userData;
 
-static int paCallback(const void *inputBuffer, void *outputBuffer,
-                      unsigned long framesPerBuffer,
-                      const PaStreamCallbackTimeInfo* timeInfo,
-                      PaStreamCallbackFlags statusFlags,
-                      void *userData)
-{
-    AudioContext *context = (AudioContext*)userData;
-    float *out = (float*)outputBuffer;
-    unsigned int i;
+    // Check if there's data available in the buffer
+    if (buffer->dwBufferLength > 0) {
+        // Copy data from the DECtalk buffer to the PortAudio output buffer
+        memcpy(outputBuffer, buffer->lpData, buffer->dwBufferLength);
 
-    (void) inputBuffer; // Prevent unused variable warning
+        // Update the buffer length to indicate data has been consumed
+        buffer->dwBufferLength = 0;
 
-    for (i = 0; i < framesPerBuffer; i++) {
-        if (context->currentIndex >= context->dataSize) {
-            *out++ = 0.0f;
-            if (i == 0) {
-                context->isPlaying = 0;
-                printf("Audio playback completed\n");
-                return paComplete;
-            }
-        } else {
-            *out++ = ((float)context->audioData[context->currentIndex++] - 128.0f) / 128.0f;
-        }
-    }
-
-    printf("Processed %lu frames, current index: %lu\n", framesPerBuffer, context->currentIndex);
-    return paContinue;
-}
-
-void on_timer(uv_timer_t* handle) {
-    PaStream *stream = (PaStream*)handle->data;
-    PaError err = Pa_StartStream(stream);
-    if (err != paNoError) {
-        printf("Failed to start PortAudio stream: %s\n", Pa_GetErrorText(err));
+        return paContinue; // Continue playback
     } else {
-        printf("Started PortAudio stream\n");
-    }
-}
-
-void check_audio_status(uv_timer_t* handle) {
-    AudioContext *context = (AudioContext*)handle->data;
-    if (!context->isPlaying) {
-        printf("Audio playback seems to have stopped\n");
-        uv_timer_stop(handle);
-        uv_stop(uv_default_loop());
+        return paComplete; // No more data, signal completion
     }
 }
 
 int main() {
-    LPTTS_HANDLE_T phTTS;
-    MMRESULT result;
-    AudioContext context = {0};
-    PaStream *stream;
     PaError err;
-    uv_loop_t *loop;
-    uv_timer_t start_timer, check_timer;
-    TTS_BUFFER_T ttsBuffer;
+    PaStream *stream;
+    LPTTS_HANDLE_T phTTS; // Use the correct type name
+    LPTTS_BUFFER_T buffers[NUM_BUFFERS];
+    int currentBuffer = 0;
+    const char *text = "This is a long line of text that will be synthesized into a memory buffer and then played back using PortAudio.";
 
     // Initialize DECtalk
-    result = TextToSpeechStartup(&phTTS, WAVE_MAPPER, 0, NULL, 0);
-    if (result != MMSYSERR_NOERROR) {
-        printf("Failed to initialize DECtalk: %d\n", result);
+    if (TextToSpeechStartupEx(&phTTS, WAVE_MAPPER, 0, NULL, 0) != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Error initializing DECtalk.\n");
         return 1;
     }
-    printf("DECtalk initialized successfully\n");
 
-    // Set up in-memory mode
-    result = TextToSpeechOpenInMemory(phTTS, WAVE_FORMAT_1M08);
-    if (result != MMSYSERR_NOERROR) {
-        printf("Failed to set up in-memory mode: %d\n", result);
-        TextToSpeechShutdown(phTTS);
-        return 1;
-    }
-    printf("In-memory mode set up successfully\n");
-
-    // Prepare the buffer
-    ttsBuffer.lpData = malloc(BUFFER_SIZE);
-    ttsBuffer.dwMaximumBufferLength = BUFFER_SIZE;
-    ttsBuffer.dwBufferLength = 0;
-
-    // Add the buffer to DECtalk
-    result = TextToSpeechAddBuffer(phTTS, &ttsBuffer);
-    if (result != MMSYSERR_NOERROR) {
-        printf("Failed to add buffer: %d\n", result);
-        free(ttsBuffer.lpData);
-        TextToSpeechShutdown(phTTS);
-        return 1;
-    }
-    printf("Buffer added successfully\n");
-
-    // Speak text
-    result = TextToSpeechSpeak(phTTS, "Hello, world! This is a test of the DECtalk text-to-speech system.", TTS_FORCE);
-    if (result != MMSYSERR_NOERROR) {
-        printf("Failed to speak text: %d\n", result);
-        free(ttsBuffer.lpData);
-        TextToSpeechShutdown(phTTS);
-        return 1;
-    }
-    printf("Text spoken successfully\n");
-
-    // Wait for the buffer to be filled
-    int timeout = 100; // 1 second timeout
-    while (ttsBuffer.dwBufferLength == 0 && timeout > 0) {
-        Pa_Sleep(10);  // Sleep for 10ms
-        timeout--;
-    }
-
-    if (ttsBuffer.dwBufferLength == 0) {
-        printf("Timeout waiting for buffer to be filled\n");
-        free(ttsBuffer.lpData);
+    // Set up speech-to-memory mode
+    if (TextToSpeechOpenInMemory(phTTS, WAVE_FORMAT_1M16) != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Error opening DECtalk in memory mode.\n");
         TextToSpeechShutdown(phTTS);
         return 1;
     }
 
-    printf("Buffer filled with %lu bytes of audio data\n", ttsBuffer.dwBufferLength);
+    // Allocate and add memory buffers
+    for (int i = 0; i < NUM_BUFFERS; i++) {
+        buffers[i] = (LPTTS_BUFFER_T)malloc(sizeof(TTS_BUFFER_T));
+        if (buffers[i] == NULL) {
+            fprintf(stderr, "Error allocating memory for buffer.\n");
+            TextToSpeechShutdown(phTTS);
+            return 1;
+        }
+        buffers[i]->lpData = (LPSTR)malloc(BUFFER_SIZE);
+        if (buffers[i]->lpData == NULL) {
+            fprintf(stderr, "Error allocating memory for buffer data.\n");
+            TextToSpeechShutdown(phTTS);
+            return 1;
+        }
+        buffers[i]->dwMaximumBufferLength = BUFFER_SIZE;
+        buffers[i]->lpPhonemeArray = NULL; // Not using phoneme data
+        buffers[i]->lpIndexArray = NULL;    // Not using index marks
+        if (TextToSpeechAddBuffer(phTTS, buffers[i]) != MMSYSERR_NOERROR) {
+            fprintf(stderr, "Error adding buffer to DECtalk.\n");
+            TextToSpeechShutdown(phTTS);
+            return 1;
+        }
+    }
 
-    context.audioData = (unsigned char *)ttsBuffer.lpData;
-    context.dataSize = ttsBuffer.dwBufferLength;
-    context.currentIndex = 0;
-    context.isPlaying = 1;
+    // Create a non-const copy of the text
+    char *textCopy = strdup(text); 
+    if (textCopy == NULL) {
+        fprintf(stderr, "Error duplicating text string.\n");
+        TextToSpeechShutdown(phTTS);
+        return 1;
+    }
+
+    // Synthesize the text using the text copy
+    if (TextToSpeechSpeak(phTTS, textCopy, TTS_NORMAL) != MMSYSERR_NOERROR) {
+        fprintf(stderr, "Error synthesizing speech.\n");
+        free(textCopy); // Free the text copy
+        TextToSpeechShutdown(phTTS);
+        return 1;
+    }
 
     // Initialize PortAudio
     err = Pa_Initialize();
     if (err != paNoError) {
-        printf("Failed to initialize PortAudio: %s\n", Pa_GetErrorText(err));
-        free(ttsBuffer.lpData);
+        fprintf(stderr, "Error initializing PortAudio: %s\n", Pa_GetErrorText(err));
+        free(textCopy); // Free the text copy
         TextToSpeechShutdown(phTTS);
         return 1;
     }
-    printf("PortAudio initialized successfully\n");
 
     // Open PortAudio stream
-    err = Pa_OpenDefaultStream(&stream, 0, NUM_CHANNELS, paFloat32, SAMPLE_RATE,
-                               FRAMES_PER_BUFFER, paCallback, &context);
+    err = Pa_OpenDefaultStream(&stream,
+                               0, // No input channels
+                               1, // Mono output
+                               paInt16, // 16-bit integer format
+                               11025,   // Sample rate (match DECtalk's output)
+                               paFramesPerBufferUnspecified,
+                               audioCallback,
+                               &buffers[currentBuffer]); 
     if (err != paNoError) {
-        printf("Failed to open PortAudio stream: %s\n", Pa_GetErrorText(err));
+        fprintf(stderr, "Error opening PortAudio stream: %s\n", Pa_GetErrorText(err));
         Pa_Terminate();
-        free(ttsBuffer.lpData);
+        free(textCopy); // Free the text copy
         TextToSpeechShutdown(phTTS);
         return 1;
     }
-    printf("PortAudio stream opened successfully\n");
 
-    // Initialize libuv
-    loop = uv_default_loop();
-    uv_timer_init(loop, &start_timer);
-    uv_timer_init(loop, &check_timer);
-    start_timer.data = stream;
-    check_timer.data = &context;
+    // Start PortAudio stream
+    err = Pa_StartStream(stream);
+    if (err != paNoError) {
+        fprintf(stderr, "Error starting PortAudio stream: %s\n", Pa_GetErrorText(err));
+        Pa_Terminate();
+        free(textCopy); // Free the text copy
+        TextToSpeechShutdown(phTTS);
+        return 1;
+    }
 
-    // Schedule audio playback after 2 seconds
-    uv_timer_start(&start_timer, on_timer, 2000, 0);
-    printf("Audio playback scheduled\n");
+    // Wait for playback to finish (buffers to be consumed)
+    while (Pa_IsStreamActive(stream)) {
+        // You might want to add a small delay here to avoid busy-waiting
+        Pa_Sleep(10); 
 
-    // Check audio status every 100ms
-    uv_timer_start(&check_timer, check_audio_status, 2100, 100);
-
-    // Run the event loop
-    printf("Starting event loop\n");
-    uv_run(loop, UV_RUN_DEFAULT);
-    printf("Event loop finished\n");
+        // Check if the current buffer is empty and there's another buffer available
+        if (buffers[currentBuffer]->dwBufferLength == 0 && 
+            buffers[(currentBuffer + 1) % NUM_BUFFERS]->dwBufferLength > 0) {
+            currentBuffer = (currentBuffer + 1) % NUM_BUFFERS; // Switch to the next buffer
+        }
+    }
 
     // Clean up
+    Pa_StopStream(stream);
     Pa_CloseStream(stream);
     Pa_Terminate();
-    free(ttsBuffer.lpData);
+    free(textCopy); // Free the text copy
     TextToSpeechShutdown(phTTS);
+
+    // Free allocated memory for buffers
+    for (int i = 0; i < NUM_BUFFERS; i++) {
+        free(buffers[i]->lpData);
+        free(buffers[i]);
+    }
 
     return 0;
 }
