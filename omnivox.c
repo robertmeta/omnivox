@@ -9,7 +9,7 @@
 #define DEFAULT_PORT 22222
 #define DEFAULT_BACKLOG 128
 #define MAX_LINE_LENGTH 1024
-#define MAX_AUDIO_QUEUE 5
+#define MAX_AUDIO_QUEUE 500
 
 typedef struct {
     uv_tcp_t handle;
