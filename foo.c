@@ -7,7 +7,7 @@
 
 #define SAMPLE_RATE 11025
 #define FRAMES_PER_BUFFER 256
-#define NUM_CHANNELS 1
+#define NUM_CHANNELS 2  // Stereo output
 #define BUFFER_SIZE 32768  // Adjust this size as needed
 
 typedef struct {
@@ -17,6 +17,24 @@ typedef struct {
     int isPlaying;
 } AudioContext;
 
+// Callback to handle buffer completion in DECtalk
+void buffer_callback(LPTTS_HANDLE_T phTTS, TTS_BUFFER_T *ttsBuffer) {
+    printf("Buffer has been filled with audio data\n");
+    // Process the audio data here, for example to play to left or right channel
+}
+
+// Function to process PCM data to play only on the left or right channel
+void process_pcm_data(unsigned char *audioData, DWORD dataSize, int leftChannelOnly) {
+    for (DWORD i = 0; i < dataSize; i += 2) {
+        if (leftChannelOnly) {
+            audioData[i + 1] = 0; // Zero out the right channel
+        } else {
+            audioData[i] = 0; // Zero out the left channel
+        }
+    }
+}
+
+// PortAudio callback function to play stereo audio
 static int paCallback(const void *inputBuffer, void *outputBuffer,
                       unsigned long framesPerBuffer,
                       const PaStreamCallbackTimeInfo* timeInfo,
@@ -31,21 +49,36 @@ static int paCallback(const void *inputBuffer, void *outputBuffer,
 
     for (i = 0; i < framesPerBuffer; i++) {
         if (context->currentIndex >= context->dataSize) {
-            *out++ = 0.0f;
+            *out++ = 0.0f;  // Left channel
+            *out++ = 0.0f;  // Right channel
             if (i == 0) {
                 context->isPlaying = 0;
                 printf("Audio playback completed\n");
                 return paComplete;
             }
         } else {
-            *out++ = ((float)context->audioData[context->currentIndex++] - 128.0f) / 128.0f;
+            float sample = ((float)context->audioData[context->currentIndex++] - 128.0f) / 128.0f;
+            *out++ = sample;  // Left channel
+            *out++ = sample;  // Right channel
         }
     }
 
-    printf("Processed %lu frames, current index: %lu\n", framesPerBuffer, context->currentIndex);
+    printf("Processed %lu frames, current index: %u\n", framesPerBuffer, context->currentIndex);
     return paContinue;
 }
 
+// Recycle the buffer for reuse by DECtalk
+void recycle_buffer(AudioContext *context, LPTTS_HANDLE_T phTTS) {
+    context->currentIndex = 0;
+    TTS_BUFFER_T ttsBuffer;
+    ttsBuffer.lpData = context->audioData;
+    ttsBuffer.dwBufferLength = context->dataSize;
+    ttsBuffer.dwMaximumBufferLength = BUFFER_SIZE;
+    TextToSpeechAddBuffer(phTTS, &ttsBuffer);  // Corrected call
+    printf("Buffer recycled for reuse\n");
+}
+
+// Timer callback to start audio playback
 void on_timer(uv_timer_t* handle) {
     PaStream *stream = (PaStream*)handle->data;
     PaError err = Pa_StartStream(stream);
@@ -56,6 +89,7 @@ void on_timer(uv_timer_t* handle) {
     }
 }
 
+// Timer callback to check the audio status
 void check_audio_status(uv_timer_t* handle) {
     AudioContext *context = (AudioContext*)handle->data;
     if (!context->isPlaying) {
@@ -131,7 +165,10 @@ int main() {
         return 1;
     }
 
-    printf("Buffer filled with %lu bytes of audio data\n", ttsBuffer.dwBufferLength);
+    printf("Buffer filled with %u bytes of audio data\n", ttsBuffer.dwBufferLength);
+
+    // Process the PCM data (optional, for example to play only left or right channel)
+    process_pcm_data((unsigned char*)ttsBuffer.lpData, ttsBuffer.dwBufferLength, 1); // Only play on the left channel
 
     context.audioData = (unsigned char *)ttsBuffer.lpData;
     context.dataSize = ttsBuffer.dwBufferLength;
