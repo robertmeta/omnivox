@@ -319,6 +319,12 @@ impl TtsEngine for EspeakTtsEngine {
         }
     }
 
+    fn is_interruptible(&self) -> bool {
+        // espeak_Cancel() can be called from any thread and causes the ongoing
+        // synthesize() to return early.  Long texts do not need word-chunking.
+        true
+    }
+
     fn is_speaking(&self) -> bool {
         if let Some(state) = ESPEAK_LOCK.get() {
             if let Ok(_guard) = state.lock() {

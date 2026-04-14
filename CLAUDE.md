@@ -2,7 +2,12 @@
 
 ## Project Overview
 
-Omnivox is a cross-platform Emacspeak speech server written in Rust. It is a drop-in replacement for SwiftMac that works on macOS, Linux, and Windows.
+Omnivox is a cross-platform speech server written in Rust. It is the recommended backend for **emacsvox** (the modern Emacspeak fork) and a drop-in replacement for any emacspeak/dtk server (`dtk-soft`, `swiftmac`, etc.) on macOS, Linux, and Windows.
+
+**Design principle (from emacsvox):** "emacsvox decides WHAT to speak. Omnivox decides HOW to speak it."
+- Omnivox trusts that each `q {}` item it receives is already a correctly-sized chunk (clause/sentence level)
+- Omnivox does NOT rechunk text by word count — that would break prosody at arbitrary boundaries
+- All configuration happens via protocol commands after startup; no CLI flags are needed for normal use
 
 ## Architecture
 
@@ -15,6 +20,7 @@ Omnivox is a cross-platform Emacspeak speech server written in Rust. It is a dro
 
 ### Key Design Decisions
 
+- **No word-count chunking in hot paths**: Each `q {}` item from emacsvox/emacspeak is already clause-level. `process_batch()` synthesizes each Speech item as a single unit. The ObjC bridge accumulates ALL AVSpeechSynthesizer callbacks into one buffer anyway, so there is no "single-buffer" benefit to word-count splitting — only prosody breakage. `chunk_text()` in `text.rs` is retained but marked `#[allow(dead_code)]`.
 - **Stereo f32 @ 44100Hz** is the universal internal buffer format. All sources convert to this before pipeline processing.
 - **Everything statically linked** - no external process calls (no sox, no CLI tools).
 - **espeak-ng always compiled in** (not feature-gated) as guaranteed cross-platform fallback.
@@ -222,27 +228,44 @@ See [ENV-VARS.md](ENV-VARS.md) for complete documentation.
 - **OMNIVOX_ENGINE** - Set to `espeak` to force espeak-ng engine
 - **OMNIVOX_AUDIO_TARGET** - Set to `left`, `right`, or `both` for channel routing. Read at startup in main.rs, passed to `ChannelRouter` effect. Used by Emacspeak for dual-server notification mode (notification server gets `OMNIVOX_AUDIO_TARGET=left`, main server uses both channels).
 
-## Emacspeak Integration
+## Emacsvox Integration (Primary User)
 
-`elisp/omnivox-voices.el` is a self-registering Emacs module. It hooks into emacspeak via `advice-add` on `voice-setup` and `dtk-speak` — no emacspeak source files need modification.
+`elisp/omnivox-voices.el` is a self-registering Emacs module. It supports both **emacsvox** (the modern fork) and **emacspeak** (classic).
 
-Setup in init.el (before emacspeak loads):
+### emacsvox Setup
+
+emacsvox invokes omnivox as a plain subprocess — no CLI args. All settings come via protocol after startup. Add to init.el **before** emacsvox loads:
 
 ```elisp
 (add-to-list 'load-path "/path/to/omnivox/elisp")
 (require 'omnivox-voices)
-(setq omnivox-default-voice-id "en-US:Alex")
-(setq omnivox-default-speech-rate 0.6)
+(setq omnivox-voice-id "en-US:Alex")    ; optional: pick a voice
+(setq omnivox-speech-rate 60)           ; optional: 0-100, 50=normal
+(setenv "EMACSVOX_TTS_PROGRAM" "omnivox")
+(require 'emacsvox)
+```
+
+emacsvox already auto-loads `plain-voices.el` for the omnivox backend. Loading `omnivox-voices.el` overrides this so pitch/voice changes (bold, italic, etc.) are sent as `[[pitch N]]` and `[{voice NAME}]` inline codes that omnivox understands. Without `omnivox-voices.el`, voice locking is silent no-ops.
+
+### How Self-Registration Works
+
+- `with-eval-after-load 'voice-setup` adds `:around` advice on `voice-setup`; when `dtk-program` matches "omnivox", calls `omnivox-configure-tts`
+- `omnivox-configure-tts` sets BOTH `tts-*` (emacspeak) and `emacsvox-tts-*` (emacsvox) voice dispatch functions — required because emacsvox-tts.el uses defalias chains that are one-directional
+- `with-eval-after-load 'emacsvox-tts` and `with-eval-after-load 'dtk-speak` each add "omnivox" to `tts-multi-engines`
+- Protocol sends initial settings (`tts_set_speech_rate`, `tts_set_pitch_multiplier`, volumes) immediately after the process starts
+
+### emacspeak / DTK Migration
+
+Emacspeak users who currently use `dtk-soft` (software DECtalk) or `swiftmac` can switch to omnivox by changing one setting. The wire protocol is identical (`q {}`, `d`, `s`, `tts_say {}`, etc.). Load omnivox-voices.el to get proper voice codes instead of DECtalk-format codes:
+
+```elisp
+(add-to-list 'load-path "/path/to/omnivox/elisp")
+(require 'omnivox-voices)
 (setq dtk-program "omnivox")
 (require 'emacspeak-setup)
 ```
 
-Ensure omnivox binary is in PATH or symlinked into emacspeak/servers/.
-
-### How Self-Registration Works
-
-- `with-eval-after-load 'voice-setup` adds `:around` advice on `voice-setup` to dispatch to `omnivox-configure-tts` when `dtk-program` matches "omnivox"
-- `with-eval-after-load 'dtk-speak` adds "omnivox" to `tts-multi-engines` and advises `dtk-notify-initialize` to set `OMNIVOX_AUDIO_TARGET`
+Ensure the omnivox binary is in PATH or symlinked into emacspeak/servers/.
 
 ### Windows-Specific Setup
 
@@ -254,13 +277,13 @@ Ensure omnivox binary is in PATH or symlinked into emacspeak/servers/.
 ### `;;` Text Handling
 
 - **Parser is correct** — regression tests in `omnivox-core/src/command.rs` (`test_parse_semicolons_*`, `test_parse_dtk_speak_format`) confirm the regex preserves all text including `;;` and content after it.
-- **If text after `;;` appears silently dropped**: the bug would be in the TTS engine layer (macOS ObjC bridge or espeak-ng), not the parser or chunker. Both `apply_punctuation` and `chunk_text` preserve all tokens. Investigate with `omnivox --dump-wav` to inspect synthesized audio before/after the pipeline.
+- **If text after `;;` appears silently dropped**: the bug would be in the TTS engine layer (macOS ObjC bridge or espeak-ng), not the parser. Investigate with `omnivox --dump-wav`.
 
 ### Dual-Server Notification Mode
 
-When Emacspeak's `dtk-set-notification-mode` is enabled, it spawns two omnivox processes:
+When notification mode is enabled, two omnivox processes are spawned:
 
 1. Main process - Uses both channels for primary speech
-2. Notification process - Emacspeak sets `OMNIVOX_AUDIO_TARGET=left` for this process
+2. Notification process - Emacspeak sets `OMNIVOX_AUDIO_TARGET=left`; emacsvox uses `emacsvox-tts-notify-initialize()` and the `tts_set_speech_channel` protocol command
 
 This enables concurrent notifications (e.g., "50 percent" in left ear) while main content continues in both ears.

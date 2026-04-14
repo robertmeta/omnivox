@@ -67,11 +67,21 @@ pub fn synthesis_worker(
                     volume: 1.0,
                 };
                 let processed = preprocess_text(&text, &state);
-                let chunks = chunk_text(&processed, 15);
-                let count = chunks.len();
-                for (i, chunk) in chunks.into_iter().enumerate() {
-                    if !synthesize_chunk(&chunk, &settings, &state, i == count - 1, &ctx) {
-                        break;
+                // Chunk tts_say only for uninterruptible engines (WinRT, Piper).
+                // For interruptible engines (macOS, espeak-ng), synthesize as one
+                // unit — chunking would break prosody at arbitrary word boundaries.
+                // For uninterruptible engines, the worker can't check is_stale()
+                // until synthesize() returns, so chunking is the only way to
+                // remain responsive to stop/interrupt commands.
+                if engine.is_interruptible() {
+                    synthesize_chunk(&processed, &settings, &state, true, &ctx);
+                } else {
+                    let chunks = chunk_text(&processed, 15);
+                    let count = chunks.len();
+                    for (i, chunk) in chunks.into_iter().enumerate() {
+                        if !synthesize_chunk(&chunk, &settings, &state, i == count - 1, &ctx) {
+                            break;
+                        }
                     }
                 }
             }

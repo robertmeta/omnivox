@@ -62,8 +62,20 @@
 ;;  Required modules:
 
 (eval-when-compile (require 'cl-lib))
-(require 'emacspeak-preamble)
+;; Support both emacsvox (new) and emacspeak (legacy) preambles.
+;; emacsvox provides emacsvox-preamble; emacspeak provides emacspeak-preamble.
+;; Both export ems--fastload and the same utility macros.
+(unless (or (require 'emacsvox-preamble nil 'noerror)
+            (require 'emacspeak-preamble nil 'noerror))
+  (error "omnivox-voices: neither emacsvox-preamble nor emacspeak-preamble found"))
 (cl-declaim  (optimize  (safety 0) (speed 3)))
+
+;; Emacs 31 deprecates cl-declare in favor of defvar for declaring special
+;; variables.  dtk-speak.el uses cl-declare for tts-default-voice but never
+;; defvar's it, so it remains unbound.  Declare it here so boundp checks pass
+;; and setq inside functions (with lexical-binding) binds the dynamic variable.
+(defvar tts-default-voice nil
+  "Default TTS voice symbol, set by TTS engine initialization (e.g. omnivox-configure-tts).")
 
 ;;;  Self-registration with emacspeak:
 ;;
@@ -82,12 +94,17 @@ the original dispatcher.  Otherwise delegate to ORIG-FN."
 (with-eval-after-load 'voice-setup
   (advice-add 'voice-setup :around #'omnivox--voice-setup-advice))
 
+;; Register omnivox in the multi-engine list so dual-stream notification
+;; works.  emacspeak uses dtk-speak/tts-multi-engines; emacsvox uses
+;; emacsvox-tts/emacsvox-tts-multi-engines (or the same tts-multi-engines
+;; variable via backward-compat aliases).
 (with-eval-after-load 'dtk-speak
   (cl-declare (special tts-multi-engines))
-  ;; Register omnivox as a multi-capable engine so tts-multistream-p returns t.
-  ;; Emacspeak's dtk-notify-initialize already sets OMNIVOX_AUDIO_TARGET from
-  ;; tts-notification-device — no additional advice needed.
   (cl-pushnew "omnivox" tts-multi-engines :test #'string=))
+
+(with-eval-after-load 'emacsvox-tts
+  (when (boundp 'tts-multi-engines)
+    (cl-pushnew "omnivox" tts-multi-engines :test #'string=)))
 
 ;;;  Customization group:
 
@@ -99,12 +116,19 @@ the original dispatcher.  Otherwise delegate to ORIG-FN."
 ;;; omnivox:
 ;;;###autoload
 (defun omnivox ()
-  "Omnivox TTS."
+  "Omnivox TTS.
+Selects omnivox as the active TTS server.  Works with both
+emacsvox and emacspeak."
   (interactive)
   (omnivox-configure-tts)
   (ems--fastload "voice-defs")
-  (dtk-select-server "omnivox")
-  (dtk-initialize))
+  (cond
+   ((fboundp 'emacsvox-tts-select-server)
+    (emacsvox-tts-select-server "omnivox")
+    (emacsvox-tts-initialize))
+   ((fboundp 'dtk-select-server)
+    (dtk-select-server "omnivox")
+    (dtk-initialize))))
 
 ;;;  Available voices (queried from server):
 
@@ -264,14 +288,27 @@ Float from 0.0 (silent) to 1.0 (full)."
 
 ;;;  Interactive commands (omnivox-specific, no dtk confusion):
 
+(defun omnivox--active-process ()
+  "Return the live omnivox speaker process, or nil if none is running.
+Checks both emacsvox-tts-speaker-process and dtk-speaker-process."
+  (cond
+   ((and (boundp 'emacsvox-tts-speaker-process)
+         (processp emacsvox-tts-speaker-process)
+         (process-live-p emacsvox-tts-speaker-process))
+    emacsvox-tts-speaker-process)
+   ((and (boundp 'dtk-speaker-process)
+         (processp dtk-speaker-process)
+         (process-live-p dtk-speaker-process))
+    dtk-speaker-process)
+   (t nil)))
+
 (defun omnivox--send (command)
-  "Send COMMAND string to the running omnivox process."
-  (cl-declare (special dtk-speaker-process))
-  (when (and (boundp 'dtk-speaker-process)
-             (process-live-p dtk-speaker-process))
-    (process-send-string
-     dtk-speaker-process
-     (concat command "\n"))))
+  "Send COMMAND string to the running omnivox process.
+Works with both emacsvox (emacsvox-tts-speaker-process) and
+emacspeak (dtk-speaker-process)."
+  (let ((proc (omnivox--active-process)))
+    (when proc
+      (process-send-string proc (concat command "\n")))))
 
 ;;;###autoload
 (defun omnivox-select-voice ()
@@ -544,38 +581,64 @@ and TABLE gives the values along that dimension."
 ;;;###autoload
 (defun omnivox-configure-tts ()
   "Configure TTS to use Omnivox.
+Works with both emacsvox (the new fork) and emacspeak (classic).
 Sends defcustom settings to the already-running omnivox process
-via protocol commands."
-  (cl-declare (special tts-default-speech-rate
-                       tts-default-voice
-                       tts-notification-device))
-  (setq tts-default-voice 'paul)
-  ;; Tell emacspeak this engine supports a second notification stream.
-  ;; dtk-notify-initialize reads tts-notification-device and passes it as
-  ;; OMNIVOX_AUDIO_TARGET to the second process automatically.
-  (setq tts-notification-device omnivox-notification-channel)
+via protocol commands.
+
+emacsvox invokes the speech server as a plain subprocess with no
+CLI args — all configuration happens here via the wire protocol.
+omnivox must not rechunk the text it receives; emacsvox already
+performs clause-level chunking before sending each `q {}' command."
+  ;; --- Voice dispatch functions ----------------------------------------
+  ;; emacsvox uses emacsvox-tts-* names; emacspeak uses tts-* names.
+  ;; Both must be set because emacsvox-tts.el creates the defalias chain
+  ;;   tts-get-voice-command → emacsvox-tts-get-voice-command
+  ;; as an alias, not a live indirection.  fset on tts-* overrides the
+  ;; alias without changing emacsvox-tts-*, so we set both explicitly.
   (fset 'tts-voice-defined-p 'omnivox-voice-defined-p)
   (fset 'tts-get-voice-command 'omnivox-get-voice-command)
   (fset 'tts-define-voice-from-acss 'omnivox-define-voice-from-acss)
-  ;; Apply rate — dtk-speech-rate is a buffer-local integer used by
-  ;; dtk-interp-sync via tts_sync_state on every utterance.  Must set
-  ;; BOTH the current-buffer value and the global default, otherwise
-  ;; buffers created before configure-tts keep the old default (100).
+  ;; emacsvox-tts-* variants (no-op when emacsvox is not loaded)
+  (when (fboundp 'emacsvox-tts-speak)
+    (fset 'emacsvox-tts-voice-defined-p 'omnivox-voice-defined-p)
+    (fset 'emacsvox-tts-get-voice-command 'omnivox-get-voice-command)
+    (fset 'emacsvox-tts-define-voice-from-acss 'omnivox-define-voice-from-acss))
+  ;; --- Default voice and notification -----------------------------------
+  (when (boundp 'tts-default-voice)
+    (setq tts-default-voice 'paul))
+  (when (boundp 'emacsvox-tts-default-voice)
+    (setq emacsvox-tts-default-voice 'paul))
+  ;; emacspeak: tts-notification-device is passed as OMNIVOX_AUDIO_TARGET
+  ;; to the notification server process.
+  (when (boundp 'tts-notification-device)
+    (setq tts-notification-device omnivox-notification-channel))
+  ;; --- Speech rate ------------------------------------------------------
+  ;; dtk-speech-rate / emacsvox-tts-speech-rate is a buffer-local integer
+  ;; used in tts_sync_state on every utterance.  Set both current-buffer
+  ;; and global default so buffers created before configure-tts pick it up.
   ;; Omnivox uses 0-100 integer scale (divided by 100 server-side).
-  (cl-declare (special dtk-speech-rate dtk-speech-rate-base dtk-speech-rate-step))
-  (setq tts-default-speech-rate omnivox-speech-rate)
-  (set-default 'tts-default-speech-rate omnivox-speech-rate)
-  (setq dtk-speech-rate omnivox-speech-rate)
-  (setq-default dtk-speech-rate omnivox-speech-rate)
-  (setq dtk-speech-rate-base 20)
-  (setq dtk-speech-rate-step 5)
-  (dtk-unicode-update-untouched-charsets
-   '(ascii latin-iso8859-1 latin-iso8859-15 latin-iso8859-9
-           eight-bit-graphic))
-  (setq emacspeak-play-program nil)
-  ;; Send settings to the running omnivox process via protocol commands.
-  ;; The process was already started by dtk-make-process before voice-setup
-  ;; called us, so protocol commands are the reliable way to configure it.
+  (when (boundp 'dtk-speech-rate)
+    (setq dtk-speech-rate omnivox-speech-rate)
+    (setq-default dtk-speech-rate omnivox-speech-rate))
+  (when (boundp 'tts-default-speech-rate)
+    (setq tts-default-speech-rate omnivox-speech-rate)
+    (set-default 'tts-default-speech-rate omnivox-speech-rate))
+  (when (boundp 'dtk-speech-rate-base)
+    (setq dtk-speech-rate-base 20))
+  (when (boundp 'dtk-speech-rate-step)
+    (setq dtk-speech-rate-step 5))
+  ;; --- Unicode and audio icon setup ------------------------------------
+  (when (fboundp 'dtk-unicode-update-untouched-charsets)
+    (dtk-unicode-update-untouched-charsets
+     '(ascii latin-iso8859-1 latin-iso8859-15 latin-iso8859-9
+             eight-bit-graphic)))
+  ;; Disable external audio icon player — omnivox plays icons natively.
+  (when (boundp 'emacspeak-play-program)
+    (setq emacspeak-play-program nil))
+  ;; --- Send protocol settings to running process -----------------------
+  ;; The process was already started (by dtk-make-process or
+  ;; emacsvox-tts-make-process) before voice-setup called us.
+  ;; Protocol commands are the reliable configuration path.
   (omnivox--send (format "tts_set_speech_rate %s" omnivox-speech-rate))
   (omnivox--send (format "tts_set_pitch_multiplier %s" omnivox-pitch))
   (omnivox--send (format "tts_set_voice_volume %s" omnivox-voice-volume))
@@ -585,11 +648,13 @@ via protocol commands."
     (omnivox--send (format "tts_set_voice %s" omnivox-voice-id)))
   ;; Query available voices
   (omnivox-refresh-voices)
-  ;; Start the notification server.  dtk-initialize already ran before
-  ;; voice-setup called us, so tts-multistream-p missed its window.
-  ;; Call dtk-notify-initialize directly; it is idempotent (kills any old
-  ;; notify process first).
-  (when (fboundp 'dtk-notify-initialize)
-    (dtk-notify-initialize)))
+  ;; --- Notification server startup ------------------------------------
+  ;; Start a second omnivox process for notifications.  The two systems
+  ;; use different function names; try both.  Both are idempotent.
+  (cond
+   ((fboundp 'emacsvox-tts-notify-initialize)
+    (emacsvox-tts-notify-initialize))
+   ((fboundp 'dtk-notify-initialize)
+    (dtk-notify-initialize))))
 
 (provide 'omnivox-voices)

@@ -172,6 +172,13 @@ impl TtsEngine for MacOsTtsEngine {
         unsafe { omnivox_stop() };
     }
 
+    fn is_interruptible(&self) -> bool {
+        // omnivox_stop() calls [synth stopSpeakingAtBoundary:AVSpeechBoundaryImmediate],
+        // which signals the dispatch_semaphore in synthesize(), causing it to return
+        // early.  Long texts do not need word-chunking for stop responsiveness.
+        true
+    }
+
     fn is_speaking(&self) -> bool {
         unsafe { omnivox_is_speaking() }
     }

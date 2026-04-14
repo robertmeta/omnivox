@@ -225,6 +225,23 @@ pub trait TtsEngine: Send + Sync {
 
     /// Get voice info by identifier
     fn voice_info(&self, identifier: &str) -> Option<VoiceInfo>;
+
+    /// Whether `stop()` causes an in-progress `synthesize()` call to return early.
+    ///
+    /// When `true`, the engine can be interrupted mid-synthesis, so long texts
+    /// do not need to be word-chunked before being sent — a call to `stop()`
+    /// will cut the synthesis short promptly.
+    ///
+    /// When `false`, `synthesize()` always runs to completion regardless of
+    /// `stop()` calls.  Long texts should be broken into smaller chunks before
+    /// synthesis so the worker can check the generation counter between chunks
+    /// and remain responsive to stop/interrupt commands.
+    ///
+    /// Default: `false` (conservative — treat engine as uninterruptible unless
+    /// explicitly overridden).
+    fn is_interruptible(&self) -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
