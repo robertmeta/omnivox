@@ -126,13 +126,15 @@ static SynthResult do_synthesize(
 
             if (synthesisComplete) break;
 
-            // If chunks have stopped arriving for 200ms, consider synthesis done.
+            // If chunks have stopped arriving for 500ms, consider synthesis done.
             // (Some macOS versions omit the frameLength==0 completion signal.)
+            // 200ms was too short: premium voices and long sentences can deliver
+            // audio in large bursts separated by >200ms of internal processing.
             if (chunksReceived > 0) {
                 if (chunksReceived != lastChunkCount) {
                     lastChunkCount = chunksReceived;
                     lastChunkTime = [NSDate date];
-                } else if ([[NSDate date] timeIntervalSinceDate:lastChunkTime] > 0.2) {
+                } else if ([[NSDate date] timeIntervalSinceDate:lastChunkTime] > 0.5) {
                     break;
                 }
             }

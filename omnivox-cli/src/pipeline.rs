@@ -9,7 +9,7 @@ use omnivox_tts::{TtsEngine, TtsSettings};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::warn;
 
-use crate::text::{chunk_text, extract_pitch, extract_voice, preprocess_text, rate_scaled_padding};
+use crate::text::{extract_pitch, extract_voice, preprocess_text, rate_scaled_padding};
 
 // ---------------------------------------------------------------------------
 // Buffer conversion
@@ -28,11 +28,17 @@ pub fn tts_buffer_to_audio_buffer(tts_buf: omnivox_tts::AudioBuffer) -> AudioBuf
 // ---------------------------------------------------------------------------
 
 pub fn build_speech_pipeline(state: &TtsState, is_last: bool) -> AudioPipeline {
-    let trailing = if is_last { rate_scaled_padding(state.speech_rate) } else { 0.0 };
+    // Non-last items in a batch get a small fixed trailing gap so consecutive
+    // clauses don't sound merged when emacsvox doesn't send explicit `sh` silence.
+    // Last item gets a rate-scaled trailing silence for a natural sentence ending.
+    let trailing = if is_last { rate_scaled_padding(state.speech_rate) } else { 0.015 };
 
     let mut pipeline = AudioPipeline::new();
+    // 10ms leading padding preserves the natural onset silence that
+    // AVSpeechSynthesizer places before each utterance.  Without it,
+    // soft consonants (s, f, h) get clipped and words start abruptly.
     pipeline.push(Box::new(SilenceTrimmer::with_asymmetric_padding(
-        0.01, 0.0, trailing,
+        0.01, 0.010, trailing,
     )));
     pipeline.push(Box::new(VolumeAdjust::new(state.voice_volume)));
     pipeline.push(Box::new(ChannelRouter::new(state.speech_routing.channel_mode)));
@@ -117,6 +123,12 @@ pub fn synthesize_chunk(
 }
 
 /// Process a dispatched batch of queue items in the worker thread.
+///
+/// Each `QueueItem::Speech` is synthesized as a single unit. The caller
+/// (emacsvox / emacspeak dtk-speak) already performs clause-level chunking
+/// before sending `q {}` commands, so omnivox must not rechunk by word count.
+/// Doing so would break prosody at arbitrary boundaries and discard the
+/// semantic structure the client carefully assembled.
 pub fn process_batch(
     items: Vec<QueueItem>,
     mut state: TtsState,
@@ -127,16 +139,12 @@ pub fn process_batch(
         return;
     }
 
-    // Pre-count total speech chunks to identify the last one for trailing padding.
-    let total_speech_chunks: usize = items
+    // Count Speech items so we can identify the last one for trailing padding.
+    let speech_count = items
         .iter()
-        .map(|item| match item {
-            QueueItem::Speech(text) => chunk_text(&preprocess_text(text, &state), 15).len(),
-            _ => 0,
-        })
-        .sum();
-
-    let mut speech_chunk_index: usize = 0;
+        .filter(|i| matches!(i, QueueItem::Speech(_)))
+        .count();
+    let mut speech_idx: usize = 0;
 
     for item in items {
         if ctx.is_stale() {
@@ -145,6 +153,8 @@ pub fn process_batch(
 
         match item {
             QueueItem::Speech(text) => {
+                speech_idx += 1;
+                let is_last = speech_idx == speech_count;
                 let settings = TtsSettings {
                     voice: state.current_voice.clone(),
                     rate: state.speech_rate,
@@ -152,13 +162,8 @@ pub fn process_batch(
                     volume: 1.0,
                 };
                 let processed = preprocess_text(&text, &state);
-                let chunks = chunk_text(&processed, 15);
-                for chunk in chunks {
-                    let is_last = speech_chunk_index == total_speech_chunks - 1;
-                    if !synthesize_chunk(&chunk, &settings, &state, is_last, ctx) {
-                        return;
-                    }
-                    speech_chunk_index += 1;
+                if !synthesize_chunk(&processed, &settings, &state, is_last, ctx) {
+                    return;
                 }
             }
 

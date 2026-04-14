@@ -20,9 +20,14 @@ pub(crate) static PITCH_RE: Lazy<regex::Regex> =
 
 /// Split text into chunks of at most `max_words` words.
 ///
-/// Keeps individual utterances small so the TTS engine produces single-buffer
-/// output, enabling aggressive silence trimming and fast cancellation between
-/// chunks.
+/// Used only for `tts_say` on engines where [`TtsEngine::is_interruptible`]
+/// returns `false` (WinRT, Piper).  For those engines, `synthesize()` runs
+/// to completion regardless of `stop()` calls, so chunking is the only way
+/// to keep the worker responsive to stop/interrupt commands between chunks.
+///
+/// **Not used in batch processing** (`q`/`d`): emacsvox and emacspeak already
+/// perform clause-level chunking before sending `q {}` commands, so omnivox
+/// receives correctly-sized units and must not rechunk them.
 pub fn chunk_text(text: &str, max_words: usize) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     if words.len() <= max_words {
@@ -204,12 +209,14 @@ pub fn normalize_rate(rate: f32) -> f32 {
     r.clamp(0.0, 2.0)
 }
 
-/// Per-chunk leading/trailing silence padding scaled by speech rate.
+/// Trailing silence for the last speech item in a dispatched batch.
 ///
-/// Slower rates get slightly more padding to avoid clipping.
+/// Provides a natural sentence-ending pause scaled by speech rate.
+/// Slower rates get more padding (speech needs more breathing room).
+/// Range: ~30ms (fast) to ~50ms (slow).
 pub fn rate_scaled_padding(rate: f32) -> f32 {
     let rate = rate.clamp(0.0, 1.0);
-    0.002 + 0.013 * (1.0 - rate)
+    0.030 + 0.020 * (1.0 - rate)
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +316,8 @@ mod tests {
         let slow = rate_scaled_padding(0.0);
         let fast = rate_scaled_padding(1.0);
         assert!(slow > fast);
-        assert!(slow <= 0.02);
-        assert!(fast >= 0.001);
+        // Slow speech: ~50ms trailing silence; fast speech: ~30ms
+        assert!(slow >= 0.04 && slow <= 0.06);
+        assert!(fast >= 0.02 && fast <= 0.04);
     }
 }
